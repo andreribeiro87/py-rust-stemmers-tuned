@@ -90,7 +90,8 @@ impl SnowballStemmer {
         
         // Try to get from cache first
         {
-            let mut cache = get_cache().lock().unwrap();
+            let mut cache = get_cache().lock()
+                .expect("Cache mutex poisoned - this should never happen");
             if let Some(cached) = cache.get(&cache_key) {
                 return cached.clone();
             }
@@ -101,7 +102,8 @@ impl SnowballStemmer {
         
         // Store in cache
         {
-            let mut cache = get_cache().lock().unwrap();
+            let mut cache = get_cache().lock()
+                .expect("Cache mutex poisoned - this should never happen");
             cache.put(cache_key, result.clone());
         }
         
@@ -119,7 +121,8 @@ impl SnowballStemmer {
                     
                     // Try to get from cache first
                     {
-                        let mut cache = get_cache().lock().unwrap();
+                        let mut cache = get_cache().lock()
+                            .expect("Cache mutex poisoned - this should never happen");
                         if let Some(cached) = cache.get(&cache_key) {
                             return cached.clone();
                         }
@@ -130,7 +133,8 @@ impl SnowballStemmer {
                     
                     // Store in cache
                     {
-                        let mut cache = get_cache().lock().unwrap();
+                        let mut cache = get_cache().lock()
+                            .expect("Cache mutex poisoned - this should never happen");
                         cache.put(cache_key, result.clone());
                     }
                     
@@ -151,7 +155,8 @@ impl SnowballStemmer {
                 
                 // Try to get from cache first
                 {
-                    let mut cache = get_cache().lock().unwrap();
+                    let mut cache = get_cache().lock()
+                        .expect("Cache mutex poisoned - this should never happen");
                     if let Some(cached) = cache.get(&cache_key) {
                         return cached.clone();
                     }
@@ -162,7 +167,8 @@ impl SnowballStemmer {
                 
                 // Store in cache
                 {
-                    let mut cache = get_cache().lock().unwrap();
+                    let mut cache = get_cache().lock()
+                        .expect("Cache mutex poisoned - this should never happen");
                     cache.put(cache_key, result.clone());
                 }
                 
