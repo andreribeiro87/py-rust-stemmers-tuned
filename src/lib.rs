@@ -120,38 +120,12 @@ impl SnowballStemmer {
     #[inline(always)]
     pub fn stem_words_parallel(&self, py: Python<'_>, inputs: Vec<String>) -> PyResult<Vec<String>> {
         // release GIL
+        // Note: Cache is disabled in parallel mode to avoid lock contention
+        // which would serialize parallel operations and defeat the purpose of parallelization
         let result = py.detach(|| {
             inputs
                 .par_iter()
-                .map(|word| {
-                    if self.use_cache {
-                        let cache_key = (algorithm_to_u8(self.algorithm), word.clone());
-                        
-                        // Try to get from cache first
-                        {
-                            let mut cache = get_cache().lock()
-                                .expect("Cache mutex poisoned - this should never happen");
-                            if let Some(cached) = cache.get(&cache_key) {
-                                return cached.clone();
-                            }
-                        }
-                        
-                        // Cache miss - perform stemming
-                        let result = self.stemmer.stem(word.as_str()).into_owned();
-                        
-                        // Store in cache
-                        {
-                            let mut cache = get_cache().lock()
-                                .expect("Cache mutex poisoned - this should never happen");
-                            cache.put(cache_key, result.clone());
-                        }
-                        
-                        result
-                    } else {
-                        // Skip cache - perform stemming directly
-                        self.stemmer.stem(word.as_str()).into_owned()
-                    }
-                })
+                .map(|word| self.stemmer.stem(word.as_str()).into_owned())
                 .collect()
         });
         Ok(result)
