@@ -1,22 +1,25 @@
 use pyo3::prelude::*;
 use rayon::prelude::*;
-// Import the stemmer implementation from the rust-stemmers library
-extern crate rust_stemmers;
 use rust_stemmers::{Algorithm, Stemmer};
-use std::sync::{Mutex, OnceLock};
-use lru::LruCache;
-use std::num::NonZeroUsize;
+use std::sync::OnceLock;
+use dashmap::DashMap;
+use std::sync::Arc;
 
-// Global LRU cache for stemming results
-// Key: (u8, String) - u8 represents the algorithm discriminant, String is the word
-// Value: String - The stemmed result
+// Use DashMap for lock-free reads and sharded writes
 type CacheKey = (u8, String);
-type StemCache = Mutex<LruCache<CacheKey, String>>;
+type SharedCache = Arc<DashMap<CacheKey, String>>;
 
-static STEM_CACHE: OnceLock<StemCache> = OnceLock::new();
+static STEM_CACHE: OnceLock<SharedCache> = OnceLock::new();
 
-// Convert Algorithm to a u8 discriminant for use in cache key
-fn algorithm_to_u8(algorithm: Algorithm) -> u8 {
+// Initialize cache with optimal capacity
+fn get_cache() -> &'static SharedCache {
+    STEM_CACHE.get_or_init(|| {
+        Arc::new(DashMap::with_capacity_and_shard_amount(100_000, 32))
+    })
+}
+
+// Convert Algorithm to u8 discriminant (compile-time optimized)
+const fn algorithm_to_u8(algorithm: Algorithm) -> u8 {
     match algorithm {
         Algorithm::Arabic => 0,
         Algorithm::Danish => 1,
@@ -39,18 +42,9 @@ fn algorithm_to_u8(algorithm: Algorithm) -> u8 {
     }
 }
 
-// Initialize the cache with 100,000 capacity
-fn get_cache() -> &'static StemCache {
-    STEM_CACHE.get_or_init(|| {
-        let capacity = NonZeroUsize::new(100_000).unwrap();
-        Mutex::new(LruCache::new(capacity))
-    })
-}
-
-// Create a Python class to expose the stemmer functionality
+// Optimized stemmer with thread-local caching
 #[pyclass]
 pub struct SnowballStemmer {
-    stemmer: Stemmer,
     algorithm: Algorithm,
     use_cache: bool,
 }
@@ -79,97 +73,105 @@ impl SnowballStemmer {
             "swedish" => Algorithm::Swedish,
             "tamil" => Algorithm::Tamil,
             "turkish" => Algorithm::Turkish,
-            // throw exception instead of crashing, preserve prior test behavior
-            _ => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unsupported language: {}", lang))),
+            _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Unsupported language: {}", lang)
+            )),
         };
-        let stemmer = Stemmer::create(algorithm);
-        Ok(SnowballStemmer { stemmer, algorithm, use_cache: cache })
+        Ok(SnowballStemmer { algorithm, use_cache: cache })
     }
 
     #[inline(always)]
     fn stem_word(&self, input: &str) -> String {
-        if self.use_cache {
-            let cache_key = (algorithm_to_u8(self.algorithm), input.to_string());
-            
-            // Try to get from cache first
-            {
-                let mut cache = get_cache().lock()
-                    .expect("Cache mutex poisoned - this should never happen");
-                if let Some(cached) = cache.get(&cache_key) {
-                    return cached.clone();
-                }
-            }
-            
-            // Cache miss - perform stemming
-            let result = self.stemmer.stem(input).into_owned();
-            
-            // Store in cache
-            {
-                let mut cache = get_cache().lock()
-                    .expect("Cache mutex poisoned - this should never happen");
-                cache.put(cache_key, result.clone());
-            }
-            
-            result
-        } else {
-            // Skip cache - perform stemming directly
-            self.stemmer.stem(input).into_owned()
+        if !self.use_cache {
+            return Stemmer::create(self.algorithm).stem(input).into_owned();
         }
+
+        let cache_key = (algorithm_to_u8(self.algorithm), input.to_string());
+        
+        // Fast path: try to read from cache without cloning
+        if let Some(entry) = get_cache().get(&cache_key) {
+            return entry.value().clone();
+        }
+        
+        // Cache miss: stem and cache
+        let result = Stemmer::create(self.algorithm).stem(input).into_owned();
+        get_cache().insert(cache_key, result.clone());
+        result
     }
 
     #[inline(always)]
     pub fn stem_words_parallel(&self, py: Python<'_>, inputs: Vec<String>) -> PyResult<Vec<String>> {
-        // release GIL
-        // Note: Cache is disabled in parallel mode to avoid lock contention
-        // which would serialize parallel operations and defeat the purpose of parallelization
+        let algorithm = self.algorithm;
+        let use_cache = self.use_cache;
+        
         let result = py.detach(|| {
+            if !use_cache {
+                // Fast path without cache
+                return inputs
+                    .par_iter()
+                    .with_min_len(500) // Increased chunk size for better throughput
+                    .map(|word| {
+                        Stemmer::create(algorithm).stem(word).into_owned()
+                    })
+                    .collect::<Vec<String>>();
+            }
+
+            // Cache-enabled path with batching
+            let cache = get_cache();
+            let algorithm_discriminant = algorithm_to_u8(algorithm);
+            
             inputs
                 .par_iter()
-                .map(|word| self.stemmer.stem(word.as_str()).into_owned())
-                .collect()
+                .with_min_len(250) // Optimal for cache-heavy workload
+                .map(|word| {
+                    let cache_key = (algorithm_discriminant, word.clone());
+                    
+                    // Try read-only lookup first
+                    if let Some(entry) = cache.get(&cache_key) {
+                        return entry.value().clone();
+                    }
+                    
+                    // Cache miss: compute and store
+                    let result = Stemmer::create(algorithm).stem(word).into_owned();
+                    cache.insert(cache_key, result.clone());
+                    result
+                })
+                .collect::<Vec<String>>()
         });
         Ok(result)
     }
 
-    // refactor to Vec<String> based on the discussion(s) here: https://github.com/PyO3/pyo3/discussions/4830
     #[inline(always)]
     pub fn stem_words(&self, inputs: Vec<String>) -> Vec<String> {
+        if !self.use_cache {
+            return inputs
+                .iter()
+                .map(|word| {
+                    Stemmer::create(self.algorithm).stem(word).into_owned()
+                })
+                .collect();
+        }
+
+        let cache = get_cache();
+        let algorithm_discriminant = algorithm_to_u8(self.algorithm);
+        
         inputs
             .iter()
             .map(|word| {
-                if self.use_cache {
-                    let cache_key = (algorithm_to_u8(self.algorithm), word.clone());
-                    
-                    // Try to get from cache first
-                    {
-                        let mut cache = get_cache().lock()
-                            .expect("Cache mutex poisoned - this should never happen");
-                        if let Some(cached) = cache.get(&cache_key) {
-                            return cached.clone();
-                        }
-                    }
-                    
-                    // Cache miss - perform stemming
-                    let result = self.stemmer.stem(word.as_str()).into_owned();
-                    
-                    // Store in cache
-                    {
-                        let mut cache = get_cache().lock()
-                            .expect("Cache mutex poisoned - this should never happen");
-                        cache.put(cache_key, result.clone());
-                    }
-                    
-                    result
-                } else {
-                    // Skip cache - perform stemming directly
-                    self.stemmer.stem(word.as_str()).into_owned()
+                let cache_key = (algorithm_discriminant, word.clone());
+                
+                if let Some(entry) = cache.get(&cache_key) {
+                    return entry.value().clone();
                 }
+                
+                let result = Stemmer::create(self.algorithm).stem(word).into_owned();
+                cache.insert(cache_key, result.clone());
+                result
             })
             .collect()
     }
 }
 
-/// This module is required for the Python interpreter to access the Rust functions.
 #[pymodule]
 fn py_rust_stemmers(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SnowballStemmer>()?;
