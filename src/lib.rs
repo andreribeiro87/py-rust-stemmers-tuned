@@ -52,12 +52,14 @@ fn get_cache() -> &'static StemCache {
 pub struct SnowballStemmer {
     stemmer: Stemmer,
     algorithm: Algorithm,
+    use_cache: bool,
 }
 
 #[pymethods]
 impl SnowballStemmer {
     #[new]
-    fn new(lang: &str) -> PyResult<Self> {
+    #[pyo3(signature = (lang, cache = true))]
+    fn new(lang: &str, cache: bool) -> PyResult<Self> {
         let algorithm = match lang.to_lowercase().as_str() {
             "arabic" => Algorithm::Arabic,
             "danish" => Algorithm::Danish,
@@ -81,33 +83,38 @@ impl SnowballStemmer {
             _ => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unsupported language: {}", lang))),
         };
         let stemmer = Stemmer::create(algorithm);
-        Ok(SnowballStemmer { stemmer, algorithm })
+        Ok(SnowballStemmer { stemmer, algorithm, use_cache: cache })
     }
 
     #[inline(always)]
     fn stem_word(&self, input: &str) -> String {
-        let cache_key = (algorithm_to_u8(self.algorithm), input.to_string());
-        
-        // Try to get from cache first
-        {
-            let mut cache = get_cache().lock()
-                .expect("Cache mutex poisoned - this should never happen");
-            if let Some(cached) = cache.get(&cache_key) {
-                return cached.clone();
+        if self.use_cache {
+            let cache_key = (algorithm_to_u8(self.algorithm), input.to_string());
+            
+            // Try to get from cache first
+            {
+                let mut cache = get_cache().lock()
+                    .expect("Cache mutex poisoned - this should never happen");
+                if let Some(cached) = cache.get(&cache_key) {
+                    return cached.clone();
+                }
             }
+            
+            // Cache miss - perform stemming
+            let result = self.stemmer.stem(input).into_owned();
+            
+            // Store in cache
+            {
+                let mut cache = get_cache().lock()
+                    .expect("Cache mutex poisoned - this should never happen");
+                cache.put(cache_key, result.clone());
+            }
+            
+            result
+        } else {
+            // Skip cache - perform stemming directly
+            self.stemmer.stem(input).into_owned()
         }
-        
-        // Cache miss - perform stemming
-        let result = self.stemmer.stem(input).into_owned();
-        
-        // Store in cache
-        {
-            let mut cache = get_cache().lock()
-                .expect("Cache mutex poisoned - this should never happen");
-            cache.put(cache_key, result.clone());
-        }
-        
-        result
     }
 
     #[inline(always)]
@@ -117,6 +124,46 @@ impl SnowballStemmer {
             inputs
                 .par_iter()
                 .map(|word| {
+                    if self.use_cache {
+                        let cache_key = (algorithm_to_u8(self.algorithm), word.clone());
+                        
+                        // Try to get from cache first
+                        {
+                            let mut cache = get_cache().lock()
+                                .expect("Cache mutex poisoned - this should never happen");
+                            if let Some(cached) = cache.get(&cache_key) {
+                                return cached.clone();
+                            }
+                        }
+                        
+                        // Cache miss - perform stemming
+                        let result = self.stemmer.stem(word.as_str()).into_owned();
+                        
+                        // Store in cache
+                        {
+                            let mut cache = get_cache().lock()
+                                .expect("Cache mutex poisoned - this should never happen");
+                            cache.put(cache_key, result.clone());
+                        }
+                        
+                        result
+                    } else {
+                        // Skip cache - perform stemming directly
+                        self.stemmer.stem(word.as_str()).into_owned()
+                    }
+                })
+                .collect()
+        });
+        Ok(result)
+    }
+
+    // refactor to Vec<String> based on the discussion(s) here: https://github.com/PyO3/pyo3/discussions/4830
+    #[inline(always)]
+    pub fn stem_words(&self, inputs: Vec<String>) -> Vec<String> {
+        inputs
+            .iter()
+            .map(|word| {
+                if self.use_cache {
                     let cache_key = (algorithm_to_u8(self.algorithm), word.clone());
                     
                     // Try to get from cache first
@@ -139,40 +186,10 @@ impl SnowballStemmer {
                     }
                     
                     result
-                })
-                .collect()
-        });
-        Ok(result)
-    }
-
-    // refactor to Vec<String> based on the discussion(s) here: https://github.com/PyO3/pyo3/discussions/4830
-    #[inline(always)]
-    pub fn stem_words(&self, inputs: Vec<String>) -> Vec<String> {
-        inputs
-            .iter()
-            .map(|word| {
-                let cache_key = (algorithm_to_u8(self.algorithm), word.clone());
-                
-                // Try to get from cache first
-                {
-                    let mut cache = get_cache().lock()
-                        .expect("Cache mutex poisoned - this should never happen");
-                    if let Some(cached) = cache.get(&cache_key) {
-                        return cached.clone();
-                    }
+                } else {
+                    // Skip cache - perform stemming directly
+                    self.stemmer.stem(word.as_str()).into_owned()
                 }
-                
-                // Cache miss - perform stemming
-                let result = self.stemmer.stem(word.as_str()).into_owned();
-                
-                // Store in cache
-                {
-                    let mut cache = get_cache().lock()
-                        .expect("Cache mutex poisoned - this should never happen");
-                    cache.put(cache_key, result.clone());
-                }
-                
-                result
             })
             .collect()
     }
