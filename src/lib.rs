@@ -113,8 +113,8 @@ impl SnowballStemmer {
     #[inline(always)]
     pub fn stem_words_parallel(&self, py: Python<'_>, inputs: Vec<String>) -> PyResult<Vec<String>> {
         // release GIL
-        py.allow_threads(|| {
-            let result = inputs
+        let result = py.detach(|| {
+            inputs
                 .par_iter()
                 .map(|word| {
                     let cache_key = (algorithm_to_u8(self.algorithm), word.clone());
@@ -140,9 +140,9 @@ impl SnowballStemmer {
                     
                     result
                 })
-                .collect();
-            Ok(result)
-        })
+                .collect()
+        });
+        Ok(result)
     }
 
     // refactor to Vec<String> based on the discussion(s) here: https://github.com/PyO3/pyo3/discussions/4830
