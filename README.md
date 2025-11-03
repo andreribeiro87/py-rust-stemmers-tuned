@@ -80,5 +80,37 @@ maturin build --release
 pip install target/wheels/py_rust_stemmers-<your os/architecture/etc>.whl
 ```
 
+## Development
+
+* Install uv
+* Install dependencies
+```sh
+uv sync
+uv pip install maturin pytest tqdm snowballstemmer
+```
+* Develop the package using maturin develop command
+```sh
+uv run maturin develop
+```
+* Build the package using maturin build command
+```sh
+uv run maturin build
+```
+* Test the package using maturin test command
+```sh
+uv run pytest
+```
+* Run speedtest
+```sh
+uv run python tests/speedtest.py
+```
+* Run benchmark for quantile
+```sh
+uv run python tests/benchmark_for_quantile.py
+```
+
+
+
+
 ## License
 This project is licensed under the MIT License. See the LICENSE file for more details.
