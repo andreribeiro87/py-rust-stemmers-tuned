@@ -1,0 +1,66 @@
+name: Publish 🚀
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build distribution on ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.14"
+
+    - name: Install the latest version of uv
+      uses: astral-sh/setup-uv@v7
+
+    - name: Install dependencies
+      run: uv sync
+
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: rustfmt
+
+    - name: Build wheels
+      run: uv run maturin build --release
+
+    - name: Store the distribution packages
+      uses: actions/upload-artifact@v5
+      with:
+        name: py-rust-stemmers-tuned-wheels-${{ matrix.os }}-${{ strategy.job-index }}
+        path: target/wheels/*.whl
+
+  publish-to-pypi:
+    name: Publish wheels to PyPI
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/py-rust-stemmers-tuned
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the wheels
+        uses: actions/download-artifact@v6
+        with:
+          path: dist/
+          merge-multiple: true
+      
+      - name: Remove files ending in linux (keep)
+        run: cd dist && rm *linux_aarch64.whl *linux_x86_64.whl
+
+      - name: Publish wheels to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
