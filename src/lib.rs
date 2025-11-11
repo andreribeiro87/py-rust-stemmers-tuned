@@ -1,9 +1,9 @@
+use dashmap::DashMap;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use rust_stemmers::{Algorithm, Stemmer};
-use std::sync::OnceLock;
-use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 // Use DashMap for lock-free reads and sharded writes
 type CacheKey = (u8, String);
@@ -13,9 +13,7 @@ static STEM_CACHE: OnceLock<SharedCache> = OnceLock::new();
 
 // Initialize cache with optimal capacity
 fn get_cache() -> &'static SharedCache {
-    STEM_CACHE.get_or_init(|| {
-        Arc::new(DashMap::with_capacity_and_shard_amount(100_000, 32))
-    })
+    STEM_CACHE.get_or_init(|| Arc::new(DashMap::with_capacity_and_shard_amount(100_000, 32)))
 }
 
 // Convert Algorithm to u8 discriminant (compile-time optimized)
@@ -73,11 +71,17 @@ impl SnowballStemmer {
             "swedish" => Algorithm::Swedish,
             "tamil" => Algorithm::Tamil,
             "turkish" => Algorithm::Turkish,
-            _ => return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Unsupported language: {}", lang)
-            )),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Unsupported language: {}",
+                    lang
+                )))
+            }
         };
-        Ok(SnowballStemmer { algorithm, use_cache: cache })
+        Ok(SnowballStemmer {
+            algorithm,
+            use_cache: cache,
+        })
     }
 
     #[inline(always)]
@@ -87,12 +91,12 @@ impl SnowballStemmer {
         }
 
         let cache_key = (algorithm_to_u8(self.algorithm), input.to_string());
-        
+
         // Fast path: try to read from cache without cloning
         if let Some(entry) = get_cache().get(&cache_key) {
             return entry.value().clone();
         }
-        
+
         // Cache miss: stem and cache
         let result = Stemmer::create(self.algorithm).stem(input).into_owned();
         get_cache().insert(cache_key, result.clone());
@@ -100,37 +104,39 @@ impl SnowballStemmer {
     }
 
     #[inline(always)]
-    pub fn stem_words_parallel(&self, py: Python<'_>, inputs: Vec<String>) -> PyResult<Vec<String>> {
+    pub fn stem_words_parallel(
+        &self,
+        py: Python<'_>,
+        inputs: Vec<String>,
+    ) -> PyResult<Vec<String>> {
         let algorithm = self.algorithm;
         let use_cache = self.use_cache;
-        
+
         let result = py.detach(|| {
             if !use_cache {
                 // Fast path without cache
                 return inputs
                     .par_iter()
                     .with_min_len(500) // Increased chunk size for better throughput
-                    .map(|word| {
-                        Stemmer::create(algorithm).stem(word).into_owned()
-                    })
+                    .map(|word| Stemmer::create(algorithm).stem(word).into_owned())
                     .collect::<Vec<String>>();
             }
 
             // Cache-enabled path with batching
             let cache = get_cache();
             let algorithm_discriminant = algorithm_to_u8(algorithm);
-            
+
             inputs
                 .par_iter()
                 .with_min_len(250) // Optimal for cache-heavy workload
                 .map(|word| {
                     let cache_key = (algorithm_discriminant, word.clone());
-                    
+
                     // Try read-only lookup first
                     if let Some(entry) = cache.get(&cache_key) {
                         return entry.value().clone();
                     }
-                    
+
                     // Cache miss: compute and store
                     let result = Stemmer::create(algorithm).stem(word).into_owned();
                     cache.insert(cache_key, result.clone());
@@ -146,24 +152,22 @@ impl SnowballStemmer {
         if !self.use_cache {
             return inputs
                 .iter()
-                .map(|word| {
-                    Stemmer::create(self.algorithm).stem(word).into_owned()
-                })
+                .map(|word| Stemmer::create(self.algorithm).stem(word).into_owned())
                 .collect();
         }
 
         let cache = get_cache();
         let algorithm_discriminant = algorithm_to_u8(self.algorithm);
-        
+
         inputs
             .iter()
             .map(|word| {
                 let cache_key = (algorithm_discriminant, word.clone());
-                
+
                 if let Some(entry) = cache.get(&cache_key) {
                     return entry.value().clone();
                 }
-                
+
                 let result = Stemmer::create(self.algorithm).stem(word).into_owned();
                 cache.insert(cache_key, result.clone());
                 result
