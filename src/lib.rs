@@ -177,7 +177,7 @@ impl SnowballStemmer {
 }
 
 #[pymodule]
-fn py_rust_stemmers(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn py_rust_stemmers_tuned(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SnowballStemmer>()?;
     Ok(())
 }
