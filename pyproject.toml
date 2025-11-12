@@ -1,6 +1,6 @@
 [project]
 name = "py_rust_stemmers_tuned"
-version = "0.1.8"
+version = "0.1.9"
 description = "Fast and parallel snowball stemmer"
 
 # Include a long description
